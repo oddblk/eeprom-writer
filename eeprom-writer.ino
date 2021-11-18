@@ -22,6 +22,8 @@
 // P                                      - set write-protection bit (Atmels only, AFAIK)
 // U                                      - clear write-protection bit (ditto)
 // V                                      - prints the version string
+// D[delay]                               - sets write delay in micro seconds
+// F[hex address]:[data in two-char hex]  - try to find working write delay
 //
 // Any data read from the EEPROM will have a CRC checksum appended to it (separated by a comma).
 // If a string of data is sent with an optional checksum, then this will be checked
@@ -36,7 +38,7 @@ const char hex[] =
   '8', '9', 'a', 'b', 'c', 'd', 'e', 'f'
 };
 
-const char version_string[] = {"EEPROM Version=0.02"};
+const char version_string[] = {"EEPROM Programmer Version=0.02"};
 
 static const int kPin_Addr14  = 24;
 static const int kPin_Addr12  = 26;
@@ -72,8 +74,8 @@ byte g_cmd[80]; // strings received from the controller will go in here
 static const int kMaxBufferSize = 16;
 byte buffer[kMaxBufferSize];
 
-static const long int k_uTime_WritePulse_uS = 1; 
-static const long int k_uTime_ReadPulse_uS = 1;
+long int k_uTime_WritePulse_uS = 250;
+static const long int k_uTime_ReadPulse_uS = 10;
 // (to be honest, both of the above are about ten times too big - but the Arduino won't reliably
 // delay down at the nanosecond level, so this is the best we can do.)
 
@@ -110,6 +112,8 @@ void setup()
 
   SetDataLinesAsInputs();
   SetAddress(0);
+
+  Serial.println(version_string);
 }
 
 void loop()
@@ -119,7 +123,7 @@ void loop()
     digitalWrite(kPin_WaitingForInput, HIGH);
     ReadString();
     digitalWrite(kPin_WaitingForInput, LOW);
-    
+
     switch (g_cmd[0])
     {
       case 'V': Serial.println(version_string); break;
@@ -127,10 +131,56 @@ void loop()
       case 'U': SetSDPState(false); break;
       case 'R': ReadEEPROM(); break;
       case 'W': WriteEEPROM(); break;
+      case 'D': SetWriteDelay(); break;
+      case 'F': FindWriteDelay(); break;
       case 0: break; // empty string. Don't mind ignoring this.
       default: Serial.println("ERR Unrecognised command"); break;
     }
   }
+}
+
+void SetWriteDelay() // D<number>  - set k_uTime_WritePulse_uS to the given number of microseconds
+{
+  if (g_cmd[1] == '?')
+  {
+    Serial.print("Write pulse time in microseconds is: ");
+    Serial.println(k_uTime_WritePulse_uS);
+  } else {
+    g_cmd[0] = '0';
+    k_uTime_WritePulse_uS = String((char *)g_cmd).toInt();
+    Serial.print("Set write pulse time to: ");
+    Serial.println(k_uTime_WritePulse_uS);
+  }
+}
+
+void FindWriteDelay()
+{
+  int startValue = k_uTime_WritePulse_uS;
+  if (g_cmd[1] == 0) {
+    strcpy((char *)g_cmd, "F0100:00112233445566778899aabbccddeeff");
+  }
+
+  Serial.println("");
+  Serial.print("Trying write delayes from ");
+  Serial.print(k_uTime_WritePulse_uS);
+  Serial.print("us to ");
+  Serial.print(k_uTime_WritePulse_uS + 100);
+  Serial.println("us");
+  Serial.print("\tusing: ");
+  Serial.println((char *)g_cmd);
+
+
+  for (; k_uTime_WritePulse_uS <= startValue + 100; k_uTime_WritePulse_uS += 10)
+  {
+    Serial.print(k_uTime_WritePulse_uS);
+    WriteEEPROM();
+    delay(10);
+    Serial.print(": \tResult: ");
+    ReadEEPROM();
+    delay(100);
+  }
+
+  k_uTime_WritePulse_uS -= 10;
 }
 
 void ReadEEPROM() // R<address>  - read kMaxBufferSize bytes from EEPROM, beginning at <address> (in hex)
@@ -148,13 +198,13 @@ void ReadEEPROM() // R<address>  - read kMaxBufferSize bytes from EEPROM, beginn
   {
     addr = addr << 4;
     addr |= HexToVal(g_cmd[x++]);
-  }     
+  }
 
   digitalWrite(kPin_nWE, HIGH); // disables write
   SetDataLinesAsInputs();
   digitalWrite(kPin_nOE, LOW); // makes the EEPROM output the byte
   delayMicroseconds(1);
-      
+
   ReadEEPROMIntoBuffer(addr, kMaxBufferSize);
 
   // now print the results, starting with the address as hex ...
@@ -165,7 +215,8 @@ void ReadEEPROM() // R<address>  - read kMaxBufferSize bytes from EEPROM, beginn
   Serial.print(":");
   PrintBuffer(kMaxBufferSize);
 
-  Serial.println("OK");
+  if (g_cmd[0] == 'R')
+    Serial.println("OK");
 
   digitalWrite(kPin_nOE, HIGH); // stops the EEPROM outputting the byte
 }
@@ -193,20 +244,20 @@ void WriteEEPROM() // W<four byte hex address>:<data in hex, two characters per 
     Serial.println("ERR");
     return;
   }
-  
+
   x++; // now points to beginning of data
   uint8_t iBufferUsed = 0;
-  while (g_cmd[x] && g_cmd[x+1] && iBufferUsed < kMaxBufferSize && g_cmd[x] != ',')
+  while (g_cmd[x] && g_cmd[x + 1] && iBufferUsed < kMaxBufferSize && g_cmd[x] != ',')
   {
-    uint8_t c = (HexToVal(g_cmd[x]) << 4) | HexToVal(g_cmd[x+1]);
+    uint8_t c = (HexToVal(g_cmd[x]) << 4) | HexToVal(g_cmd[x + 1]);
     buffer[iBufferUsed++] = c;
     x += 2;
   }
 
   // if we're pointing to a comma, then the optional checksum has been provided!
-  if (g_cmd[x] == ',' && g_cmd[x+1] && g_cmd[x+2])
+  if (g_cmd[x] == ',' && g_cmd[x + 1] && g_cmd[x + 2])
   {
-    byte checksum = (HexToVal(g_cmd[x+1]) << 4) | HexToVal(g_cmd[x+2]);
+    byte checksum = (HexToVal(g_cmd[x + 1]) << 4) | HexToVal(g_cmd[x + 2]);
 
     byte our_checksum = CalcBufferChecksum(iBufferUsed);
 
@@ -228,8 +279,8 @@ void WriteEEPROM() // W<four byte hex address>:<data in hex, two characters per 
   {
     WriteBufferToEEPROM(addr, iBufferUsed);
   }
-
-  if (iBufferUsed > -1)
+  
+  if(g_cmd[0] == 'W' && iBufferUsed > -1)
   {
     Serial.println("OK");
   }
@@ -247,9 +298,9 @@ void SetSDPState(bool bWriteProtect)
   digitalWrite(kPin_nWE, HIGH); // disables write
   digitalWrite(kPin_nOE, LOW); // makes the EEPROM output the byte
   SetDataLinesAsInputs();
-  
+
   byte bytezero = ReadByteFrom(0);
-  
+
   digitalWrite(kPin_nOE, HIGH); // stop EEPROM from outputting byte
   digitalWrite(kPin_nCE, HIGH);
   SetDataLinesAsOutputs();
@@ -269,7 +320,7 @@ void SetSDPState(bool bWriteProtect)
     WriteByteTo(0x0AAA, 0x55);
     WriteByteTo(0x1555, 0x20);
   }
-  
+
   WriteByteTo(0x0000, bytezero); // this "dummy" write is required so that the EEPROM will flush its buffer of commands.
 
   digitalWrite(kPin_nCE, LOW); // return to on by default for the rest of the code
@@ -294,7 +345,7 @@ void ReadEEPROMIntoBuffer(int addr, int size)
   digitalWrite(kPin_nWE, HIGH);
   SetDataLinesAsInputs();
   digitalWrite(kPin_nOE, LOW);
-  
+
   for (int x = 0; x < size; ++x)
   {
     buffer[x] = ReadByteFrom(addr + x);
@@ -315,7 +366,7 @@ void WriteBufferToEEPROM(int addr, int size)
   {
     WriteByteTo(addr + x, buffer[x]);
   }
-  
+
   digitalWrite(kPin_LED_Red, LOW);
 }
 
@@ -342,11 +393,11 @@ void WriteByteTo(int addr, byte b)
   SetData(b);
 
   digitalWrite(kPin_nCE, LOW);
-  digitalWrite(kPin_nWE, LOW); // enable write  
+  digitalWrite(kPin_nWE, LOW); // enable write
   delayMicroseconds(k_uTime_WritePulse_uS);
-  
+
   digitalWrite(kPin_nWE, HIGH); // disable write
-  digitalWrite(kPin_nCE, HIGH); 
+  digitalWrite(kPin_nCE, HIGH);
 }
 
 // ----------------------------------------------------------------------------------------
@@ -377,34 +428,34 @@ void SetDataLinesAsOutputs()
 
 void SetAddress(int a)
 {
-  digitalWrite(kPin_Addr0,  (a&1)?HIGH:LOW    );
-  digitalWrite(kPin_Addr1,  (a&2)?HIGH:LOW    );
-  digitalWrite(kPin_Addr2,  (a&4)?HIGH:LOW    );
-  digitalWrite(kPin_Addr3,  (a&8)?HIGH:LOW    );
-  digitalWrite(kPin_Addr4,  (a&16)?HIGH:LOW   );
-  digitalWrite(kPin_Addr5,  (a&32)?HIGH:LOW   );
-  digitalWrite(kPin_Addr6,  (a&64)?HIGH:LOW   );
-  digitalWrite(kPin_Addr7,  (a&128)?HIGH:LOW  );
-  digitalWrite(kPin_Addr8,  (a&256)?HIGH:LOW  );
-  digitalWrite(kPin_Addr9,  (a&512)?HIGH:LOW  );
-  digitalWrite(kPin_Addr10, (a&1024)?HIGH:LOW );
-  digitalWrite(kPin_Addr11, (a&2048)?HIGH:LOW );
-  digitalWrite(kPin_Addr12, (a&4096)?HIGH:LOW );
-  digitalWrite(kPin_Addr13, (a&8192)?HIGH:LOW );
-  digitalWrite(kPin_Addr14, (a&16384)?HIGH:LOW);
+  digitalWrite(kPin_Addr0,  (a & 1) ? HIGH : LOW    );
+  digitalWrite(kPin_Addr1,  (a & 2) ? HIGH : LOW    );
+  digitalWrite(kPin_Addr2,  (a & 4) ? HIGH : LOW    );
+  digitalWrite(kPin_Addr3,  (a & 8) ? HIGH : LOW    );
+  digitalWrite(kPin_Addr4,  (a & 16) ? HIGH : LOW   );
+  digitalWrite(kPin_Addr5,  (a & 32) ? HIGH : LOW   );
+  digitalWrite(kPin_Addr6,  (a & 64) ? HIGH : LOW   );
+  digitalWrite(kPin_Addr7,  (a & 128) ? HIGH : LOW  );
+  digitalWrite(kPin_Addr8,  (a & 256) ? HIGH : LOW  );
+  digitalWrite(kPin_Addr9,  (a & 512) ? HIGH : LOW  );
+  digitalWrite(kPin_Addr10, (a & 1024) ? HIGH : LOW );
+  digitalWrite(kPin_Addr11, (a & 2048) ? HIGH : LOW );
+  digitalWrite(kPin_Addr12, (a & 4096) ? HIGH : LOW );
+  digitalWrite(kPin_Addr13, (a & 8192) ? HIGH : LOW );
+  digitalWrite(kPin_Addr14, (a & 16384) ? HIGH : LOW);
 }
 
 // this function assumes that data lines have already been set as OUTPUTS.
 void SetData(byte b)
 {
-  digitalWrite(kPin_Data0, (b&1)?HIGH:LOW  );
-  digitalWrite(kPin_Data1, (b&2)?HIGH:LOW  );
-  digitalWrite(kPin_Data2, (b&4)?HIGH:LOW  );
-  digitalWrite(kPin_Data3, (b&8)?HIGH:LOW  );
-  digitalWrite(kPin_Data4, (b&16)?HIGH:LOW );
-  digitalWrite(kPin_Data5, (b&32)?HIGH:LOW );
-  digitalWrite(kPin_Data6, (b&64)?HIGH:LOW );
-  digitalWrite(kPin_Data7, (b&128)?HIGH:LOW);
+  digitalWrite(kPin_Data0, (b & 1) ? HIGH : LOW  );
+  digitalWrite(kPin_Data1, (b & 2) ? HIGH : LOW  );
+  digitalWrite(kPin_Data2, (b & 4) ? HIGH : LOW  );
+  digitalWrite(kPin_Data3, (b & 8) ? HIGH : LOW  );
+  digitalWrite(kPin_Data4, (b & 16) ? HIGH : LOW );
+  digitalWrite(kPin_Data5, (b & 32) ? HIGH : LOW );
+  digitalWrite(kPin_Data6, (b & 64) ? HIGH : LOW );
+  digitalWrite(kPin_Data7, (b & 128) ? HIGH : LOW);
 }
 
 // this function assumes that data lines have already been set as INPUTS.
@@ -421,7 +472,7 @@ byte ReadData()
   if (digitalRead(kPin_Data6) == HIGH) b |= 64;
   if (digitalRead(kPin_Data7) == HIGH) b |= 128;
 
-  return(b);
+  return (b);
 }
 
 // ----------------------------------------------------------------------------------------
@@ -461,7 +512,7 @@ void ReadString()
         g_cmd[i] = 0;
       }
     }
-  } 
+  }
   while (c != 10);
 }
 
@@ -474,16 +525,14 @@ uint8_t CalcBufferChecksum(uint8_t size)
     chk = chk ^  buffer[x];
   }
 
-  return(chk);
+  return (chk);
 }
 
 // converts one character of a HEX value into its absolute value (nibble)
 byte HexToVal(byte b)
 {
-  if (b >= '0' && b <= '9') return(b - '0');
-  if (b >= 'A' && b <= 'F') return((b - 'A') + 10);
-  if (b >= 'a' && b <= 'f') return((b - 'a') + 10);
-  return(0);
+  if (b >= '0' && b <= '9') return (b - '0');
+  if (b >= 'A' && b <= 'F') return ((b - 'A') + 10);
+  if (b >= 'a' && b <= 'f') return ((b - 'a') + 10);
+  return (0);
 }
-
-

@@ -15,7 +15,7 @@
 //
 // http://danceswithferrets.org/geekblog/?page_id=903
 //
-// This software presents a 9600-8N1 serial port.
+// This software presents a 115200-8N1 serial port.
 //
 // R[hex address]                         - reads 16 bytes of data from the EEPROM
 // W[hex address]:[data in two-char hex]  - writes up to 16 bytes of data to the EEPROM
@@ -33,6 +33,11 @@
 
 #include <avr/pgmspace.h>
 
+extern "C" {
+  #include "puff.h"
+  #include "adler32.h"
+  #include "base64.h"
+}
 
 const char version_string[] = {"EEPROM Version=0.03"};
 
@@ -79,21 +84,17 @@ byte command[80]; // strings received from the controller will go in here; note 
 static const int kMaxBufferSize = 64;
 byte buffer[kMaxBufferSize];
 
-static const long int k_uTime_WritePulse_uS = 1; 
+static const long int k_uTime_WritePulse_uS = 1;
 static const long int k_uTime_ReadPulse_uS = 1;
 // (to be honest, both of the above are about ten times too big - but the Arduino won't reliably
 // delay down at the nanosecond level, so this is the best we can do.)
 
-extern "C" {
-  #include "puff.h"
-  #include "adler32.h"
-  #include "base64.h"
-}
+static const unsigned eeprom_size = 1 << 15;   // 32K
 
 // the setup function runs once when you press reset or power the board
 void setup()
 {
-  Serial.begin(9600);
+  Serial.begin(115200);
 
   pinMode(kPin_WaitingForInput, OUTPUT); digitalWrite(kPin_WaitingForInput, HIGH);
   pinMode(kPin_LED_Red, OUTPUT); digitalWrite(kPin_LED_Red, LOW);
@@ -104,7 +105,7 @@ void setup()
 
   // control lines are ALWAYS outputs from Arduino perspective
   pinMode(kPin_nCE, OUTPUT); digitalWrite(kPin_nCE, LOW);   // chip always enabled
-  pinMode(kPin_nWE, OUTPUT); digitalWrite(kPin_nWE, HIGH);  // disable write by default 
+  pinMode(kPin_nWE, OUTPUT); digitalWrite(kPin_nWE, HIGH);  // disable write by default
   pinMode(kPin_nOE, OUTPUT); // LOW is reading, HIGH is writing
 
   SetDataDirection(INPUT);
@@ -121,7 +122,7 @@ void loop()
     digitalWrite(kPin_WaitingForInput, HIGH);
     ReadString();
     digitalWrite(kPin_WaitingForInput, LOW);
-    
+
     switch (command[0] & 0xDF)      // unset 0b0010 0000 to allow lower case
     {
       case 'V': Serial.println(version_string); break;
@@ -130,20 +131,21 @@ void loop()
       case 'R': ReadEEPROM(); break;
       case 'W': WriteEEPROM(); break;
       case 'Z': BulkWriteEEPROM(); break;
+      case 'C': ChecksumEEPROM(); break;
       case 0: break; // empty string. Don't mind ignoring this.
-      default: Serial.println("ERR Unrecognised command"); break;
+      default: Serial.println("ERR bad command"); break;
     }
   }
 }
 
-void ReadEEPROM() 
-// R <address> [<length>]  
+void ReadEEPROM()
+// R <address> [<length>]
 // reads up to kMaxBufferSize bytes from EEPROM, beginning at <address> (in hex)
-// length defaults to 16 
+// length defaults to 16
 {
   if (command[1] == 0)
   {
-    Serial.println("ERR");
+    Serial.println("ERR no address");
     return;
   }
 
@@ -153,12 +155,12 @@ void ReadEEPROM()
       n = strtol(p, NULL, 16);
 
   if (n == 0) n = 16;
-  else 
+  else
     if (n > kMaxBufferSize) n = kMaxBufferSize;
 
   SetDataDirection(INPUT);
   delayMicroseconds(1);
-      
+
   ReadEEPROMIntoBuffer(buffer, addr, n);
 
   // now print the results, starting with the address as hex ...
@@ -173,7 +175,7 @@ void WriteEEPROM() // W<four byte hex address>:<data in hex, two characters per 
 {
   if (command[1] == 0)
   {
-    Serial.println("ERR");
+    Serial.println("ERR no address");
     return;
   }
 
@@ -182,7 +184,7 @@ void WriteEEPROM() // W<four byte hex address>:<data in hex, two characters per 
 
   while(*p && *p != ':') p++;
   if (!(*p)) {
-    Serial.println("ERR");
+    Serial.println("ERR no data");
     return;
   }
   p++;
@@ -220,7 +222,7 @@ void WriteEEPROM() // W<four byte hex address>:<data in hex, two characters per 
     }
   }
 
-  // buffer should now contains some data
+  // buffer should now contain some data
   if (iBufferUsed > 0)
   {
     WriteBufferToEEPROM(buffer, addr, iBufferUsed);
@@ -231,6 +233,9 @@ void WriteEEPROM() // W<four byte hex address>:<data in hex, two characters per 
     Serial.println("OK");
   }
 }
+
+
+/* implement simple streaming reader/writer to hook up base64 deflate */
 
 struct SerialReader {
     unsigned char buf[kMaxBufferSize];
@@ -248,12 +253,7 @@ void sr_init(SerialReader *s) {
 
 int sr_read(SerialReader *s, unsigned char *buf, unsigned n) {
     unsigned req, actual, avail;
-    //TODO
-/*    
-    Serial.print("Reading ");
-    Serial.print(n);
-    Serial.println(" chars from serial");
-*/
+
     actual = 0;
     while (actual < n) {
         if (s->bufidx >= s->buflen) {
@@ -275,8 +275,7 @@ int sr_read(SerialReader *s, unsigned char *buf, unsigned n) {
     return actual;
 }
 
-const unsigned eeprom_size = 1 << 15;   // 32K
-const unsigned ew_bufsiz = 1 << 5;      // must be a power of 2 for rewrite implementation
+const unsigned ew_bufsiz = 1 << 8;      // must be a power of 2 for rewrite implementation
 
 struct EepromWriter {
     unsigned long base_address;
@@ -287,7 +286,6 @@ struct EepromWriter {
     unsigned long outlen;
     unsigned long chksum;
 };
-
 
 void ew_init(EepromWriter *ew, unsigned long base_address);
 int ew_write(EepromWriter *ew, const unsigned char *buf, unsigned n);
@@ -311,13 +309,6 @@ int ew_write(EepromWriter *ew, const unsigned char *buf, unsigned n) {
         if (ew->bufidx & ew_bufsiz) ew_flush(ew);
         k = n - actual;
         if (k > ew_bufsiz - ew->bufidx) k = ew_bufsiz - ew->bufidx;
-//TODO
-/*
-        Serial.print("Writing ");
-        Serial.print(k);
-        Serial.print(" bytes to buf + ");
-        Serial.println(ew->bufidx);
-*/
         memcpy(ew->buf + ew->bufidx, buf + actual, k);
         actual += k;
         ew->bufidx += k;
@@ -336,15 +327,6 @@ int ew_rewrite(EepromWriter *ew, int n, unsigned dist) {
          * so that, e.g. rewrite(..., 10, -1) makes 10 copies of the last byte
          */
         unsigned from = (ew->bufidx - dist) & (ew_bufsiz - 1);
-//TODO
-/*        
-        Serial.print("rolling recall: dist ");
-        Serial.print(dist);
-        Serial.print(" bufidx ");
-        Serial.print(ew->bufidx);
-        Serial.print(" from ");
-        Serial.println(from);
-*/
         for (int i=0; i<n; i++) {
             if (ew->bufidx & ew_bufsiz) ew_flush(ew);
             if (from & ew_bufsiz) from = 0;
@@ -364,34 +346,58 @@ int ew_rewrite(EepromWriter *ew, int n, unsigned dist) {
         }
     }
     return n;
-} 
+}
 
 void ew_flush(EepromWriter *ew) {
     /* flush buffer to eeprom */
 
     /* outlen tracks the current address including the buffer contents */
     ew->chksum = adler32(ew->chksum, ew->buf, ew->bufidx);
-//TODO
-/*
-    Serial.print("Writing ");
-    Serial.print(ew->bufidx);
-    Serial.print(" bytes from ew->buf to eeprom @ ");
-    Serial.println(ew->base_address + ew->outlen - ew->bufidx);
-*/
     WriteBufferToEEPROM(ew->buf, ew->base_address + ew->outlen - ew->bufidx, ew->bufidx);
-
-    //TODO also print line
-    memcpy(command, ew->buf, ew->bufidx);
-    command[ew->bufidx] = 0;
-    Serial.print((char*)command);
-
     ew->bufidx = 0;
 }
+
+void ChecksumEEPROM() {
+    // C <four byte address>  <hex length>
+    // show both the simple xor and adler32 checksum for the data range
+    // if address not provided, it defaults to zero
+    // if length not provided it defaults to eeprom size - start
+
+    // decode ASCII representation of address (in hex) into an actual value
+    char *p = NULL;
+    unsigned long addr = strtol(command+1, &p, 16),
+        n = strtol(p, NULL, 16);
+    if (n == 0 || addr + n > eeprom_size) n = eeprom_size - addr;
+
+    unsigned long a32chk = 1, xorchk = 0;
+
+    Serial.println("Computing checksums");
+
+    while (n > 0) {
+        int i = n > kMaxBufferSize ? kMaxBufferSize : n;
+        ReadEEPROMIntoBuffer(buffer, addr, i);
+        a32chk = adler32(a32chk, buffer, i);
+        xorchk ^= CalcBufferChecksum(i);
+        addr += i;
+        n -= i;
+    }
+    Serial.print("XOR ");
+    if (xorchk < 16) Serial.print("0");
+    Serial.print(xorchk, HEX);
+    Serial.print(" ADLER32 ");
+    for (int i=3; i>=0; i--) {
+        unsigned b = (a32chk >> (i<<3)) & 0xff;
+        if (b < 16) Serial.print("0");
+        Serial.print(b, HEX);
+    }
+    Serial.println();
+}
+
 
 void BulkWriteEEPROM() {
   // Z <four byte address>
   // followed by base64 encoded deflate data (max 64 char per line) terminated by blank line
-  // Here's an example including the two byte header 78 9c and trailing checksum dd 08 8a fb (3708324603).  // DD 08 FB 00
+  // Here's an example with header 78 9c and trailing checksum dd 08 8a fb (3708324603) which decodes to 388 bytes
   /*
 Z 1234
 eJwtkEFyhTAMQ/ecQhfoP0a77BkMMeD5xmESU0pPX/HbXTKyNE96l4Z6JCyQ
@@ -404,18 +410,11 @@ Enyx5BrccVr1L0Lo00w2UJqsqDx+Ad0Iivs=
 
   if (command[1] == 0)
   {
-    Serial.println("ERR: expected address for bulk write");
+    Serial.println("ERR no address");
     return;
   }
 
   unsigned long addr = strtol(command+1, NULL, 16);
-
-//TODO
-/*
-  Serial.println("Decoding base64 compressed data...");
-  Serial.print("Writing to address ");
-  Serial.println(addr);
-*/
 
   SerialReader sr;
   B64Decoder b64;
@@ -425,32 +424,34 @@ Enyx5BrccVr1L0Lo00w2UJqsqDx+Ad0Iivs=
   b64_init(&b64, &sr, sr_read);
   ew_init(&ew, addr);
 
-  ZIO zio = { 
+  ZIO zio = {
       &b64, b64_read,
       &ew, ew_write, ew_rewrite,
   };
 
-  Serial.println("deflating...");
+  Serial.println("B64Z");   // acknowledge ready for data
+
   int status = puffs(&zio, 1);
   ew_flush(&ew);
-
-  Serial.println();
-  Serial.print("deflate status: ");
-  Serial.println(status);
-  Serial.print("adler32 checksum: ");
-  Serial.println(ew.chksum);
   unsigned long expected=0;
   unsigned char data[4];
-  Serial.print("Reading checksum:");
-  Serial.println(b64_read(&b64, data, 4));
-  for(int i=0; i<4; i++) {
-    Serial.print(data[i], HEX);
-    Serial.print(" ");
-    expected = (expected << 8) | data[i];
-  }
-  Serial.print("expected: ");
-  Serial.println(expected);
+  b64_read(&b64, data, 4);
+  for(int i=0; i<4; i++)
+      expected = (expected << 8) | data[i];
 
+  Serial.print("STATUS ");
+  Serial.print(status);
+  Serial.print(" BYTES ");
+  Serial.print(ew.outlen);
+  Serial.print(" ADLER32 ");
+  if (expected == ew.chksum) {
+    Serial.println("OK");
+  } else {
+    Serial.print("FAIL expected ");
+    Serial.print(expected);
+    Serial.print(" but got ");
+    Serial.println(ew.chksum);
+  }
 }
 
 // Important note: the EEPROM needs to have data written to it immediately after sending the "unprotect" command, so that the buffer is flushed.
@@ -463,9 +464,9 @@ void SetSDPState(bool bWriteProtect)
   digitalWrite(kPin_LED_Red, HIGH);
 
   SetDataDirection(INPUT);
-  
+
   byte bytezero = ReadByteFrom(0);
-  
+
   SetDataDirection(OUTPUT);
 
   if (bWriteProtect)
@@ -483,7 +484,7 @@ void SetSDPState(bool bWriteProtect)
     WriteByteTo(0x0AAA, 0x55);
     WriteByteTo(0x1555, 0x20);
   }
-  
+
   WriteByteTo(0x0000, bytezero); // this "dummy" write is required so that the EEPROM will flush its buffer of commands.
 
   digitalWrite(kPin_LED_Red, LOW);
@@ -506,7 +507,7 @@ void ReadEEPROMIntoBuffer(unsigned char *buf, unsigned long addr, int size)
   // nCE and nOE LOW; nWE HIGH for reading
   digitalWrite(kPin_LED_Grn, HIGH);
   SetDataDirection(INPUT);
-  
+
   for (int i = 0; i < size; i++)
   {
     buf[i] = ReadByteFrom(addr + i);
@@ -520,16 +521,19 @@ void WriteBufferToEEPROM(unsigned char *buf, unsigned long addr, int size)
   // with OE high and CE low, pulse WE low to write current byte
   digitalWrite(kPin_LED_Red, HIGH);
 
-  SetDataDirection(OUTPUT);              
+  SetDataDirection(OUTPUT);
 
   for (int i=0; i < size; i++)
   {
     WriteByteTo(addr++, buf[i]);
-    // we can latch multiple bytes for writing if we write each within 150us of the previous
-    // but when we cross a page boundary or write the final byte we need to wait for write cycle to complete (up to 10ms)
-    if ((addr & 0x1f) == 0 || i+1 == size) AwaitWriteComplete(buf[i]);
+    /*
+     * we can latch multiple bytes for writing if we write each within 150us of the previous
+     * but when we cross a 64-byte page boundary or write the final byte we need to wait for write cycle 
+     * to start and complete (up to 10ms)
+     */
+    if ((addr & 0x3f) == 0 || i+1 == size) AwaitWriteComplete(buf[i]);
   }
-  
+
   digitalWrite(kPin_LED_Red, LOW);
 }
 
@@ -551,24 +555,23 @@ void WriteByteTo(unsigned long addr, byte b)
   SetAddress(addr);
   SetData(b);
 
-  // The address is latched on the falling edge of WE (or CE), whichever occurs last. 
+  // The address is latched on the falling edge of WE (or CE), whichever occurs last.
   // The data is latched by the first rising edge of WE (or CE).
-  digitalWrite(kPin_nWE, LOW);  // pulse low to write byte  (falling edge) 
+  digitalWrite(kPin_nWE, LOW);  // pulse low to write byte  (falling edge)
   delayMicroseconds(k_uTime_WritePulse_uS);
   digitalWrite(kPin_nWE, HIGH); // end pulse (rising edge)
 }
 
 void AwaitWriteComplete(byte b) {
-    // Once a byte write has been started it will automatically time itself to completion. 
-    // Once a programming operation has been initiated and for the
-    // duration of tWC (max 10ms == 10000us), a read operation will effectively be a polling operation.
-    // after writing a byte or group of bytes sharing the same 64 bit page (address A6...A14 fixed)
-    // we need to wait for data pin 7 to match what we wrote
-
-//TODO    Serial.println("(awaiting write)");
+    /*
+     * per the datasheet:
+     * Once a byte write has been started it will automatically time itself to completion.
+     * During the write cycle (max 10ms == 10000us), a read operation will effectively be a polling operation.
+     * Reading the last byte written shows bit 7 complemented and bit 6 toggling until
+     * the write cycle is done, so we can just wait for the full byte to match what we wrote
+     */
     SetDataDirection(INPUT);
-    // keep reading the last byte until pin 7 matches what we wrote
-    while ((ReadData() & 0x80) != (b & 0x80)) delayMicroseconds(100);
+    while (ReadData() != b) delayMicroseconds(100);
     SetDataDirection(OUTPUT);
 }
 
@@ -579,7 +582,7 @@ void SetDataDirection(unsigned direction)
 {
   for (int i=0; i<8; i++) pinMode(dataPins[i], direction);
   // set eeprom to output when arduino wants to input, and vice versa
-  digitalWrite(kPin_nOE, direction == INPUT ? LOW: HIGH);  
+  digitalWrite(kPin_nOE, direction == INPUT ? LOW: HIGH);
   delayMicroseconds(1);
 }
 

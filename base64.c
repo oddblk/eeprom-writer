@@ -31,13 +31,13 @@ unsigned char _b64bits(unsigned char b)
     return v;
 }
 
-void b64_init(B64Decoder *b64, void *in, int (*read)(void *in, unsigned char *buf, unsigned n)) {
+void b64_init(B64Decoder *b64, void *in, int (*read)(void *in, unsigned char *buf, int n)) {
     b64->in = in;
     b64->read = read;
     b64->n = 0;
 }
 
-int b64_read(B64Decoder *b64, unsigned char *buf, unsigned n) {
+int b64_read(B64Decoder *b64, unsigned char *buf, int n) {
     int i, j, skip;
     unsigned char c, data[4];
     long packed;

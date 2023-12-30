@@ -768,7 +768,7 @@ local int dynamic(struct state *s)
  *   expected values to check.
  */
 
-int puffs(ZIO *z, unsigned validate_header)
+int puffs(ZIO *z, int validate_header)
 {
     struct state s;             /* input/output state */
     int last, type;             /* block information */
@@ -789,7 +789,7 @@ int puffs(ZIO *z, unsigned validate_header)
          * a four byte adler32 checksum of the decoded data in MSB order follows the payload
          * see https://www.rfc-editor.org/rfc/rfc1950
          */
-        unsigned header = getbyte(&s);
+        int header = getbyte(&s);
         if (header & 0xf != 8) {
             err = 13;
         } else {

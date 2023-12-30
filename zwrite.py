@@ -54,45 +54,54 @@ else:
 print(f"(connecting to arduino at {usb_port})")
 
 # pyserial defaults match 8N1 sketch, i.e. bytesize=EIGHTBITS, parity=PARITY_NONE, stopbits=STOPBITS_ONE
-conn = Serial(port=usb_port, baudrate=115200, timeout=1)
+conn = Serial(port=usb_port, baudrate=115200, timeout=5)
 
-def showline(conn):
-    print(conn.readline().decode('ascii').rstrip())
+# readline can timeout on long write cycles, so wait for actual content
+def await_response(show=True):
+    while True:
+        line = conn.readline().decode('ascii').rstrip()
+        if line:
+            break
+    if show:
+        print(line)
+    return line
 
-showline(conn)      # wait for ready
+
+await_response()      # wait for ready
 
 print('(eeprom-writer version)')
 conn.write(b'V\n')
-showline(conn)
+await_response()
 
-print('(uploading data)')
+print(f'(uploading data @ address {args.address})')
 conn.write(f"Z {args.address}\n".encode('ascii'))
-showline(conn)
+await_response()
 
 # write each line of encoded payload, and wait for ack
+ok = True
 for line in chunked(payload):
-    print(len(line), line)
     conn.write(line + b'\n')
-    v = conn.readline().decode('ascii').rstrip()
-    if not v:
-        print('empty!')
-    if v and v != str(len(line)):
-        print(f"(arduino reported unexpected line length {v})")
+    ack = await_response(show=False)
+    ok = ack == str(len(line))
+    if not ok:
+        print(f"(arduino reported unexpected line length {ack})")
         break
     print('.', end='')
     sys.stdout.flush()
 
 print()
 
-print('(upload complete)')
-showline(conn)
+if ok:
+    print('(upload complete)')
+    await_response()
 
-if args.check:
-    adler32 = '{:08x}'.format(int.from_bytes(zipped[-4:], 'big')).upper()
-    xor = '{:02x}'.format(reduce(lambda x, y: x^y, rom)).upper()
-    print(f"(verifying checksum, expect BYTES {len(rom)} XOR {xor} ADLER32 {adler32})")
-    conn.write(f"C {args.address} {len(rom):04x}\n".encode('ascii'))
-    showline(conn)
-    showline(conn)
+    if args.check:
+        adler32 = '{:08x}'.format(int.from_bytes(zipped[-4:], 'big')).upper()
+        xor = '{:02x}'.format(reduce(lambda x, y: x^y, rom)).upper()
+        print(f"(verifying checksum, expect BYTES {len(rom)} XOR {xor} ADLER32 {adler32})")
+        conn.write(f"C {args.address} {len(rom):04x}\n".encode('ascii'))
+        await_response()
+else:
+    print('(upload failed)')
 
 conn.close()

@@ -32,11 +32,11 @@
 
 typedef struct _zio {
     void *in;
-    int (*read)(void *in, unsigned char *buf, unsigned n);
+    int (*read)(void *in, unsigned char *buf, int n);
 
     void *out;
-    int (*write)(void *out, const unsigned char *buf, unsigned n);
+    int (*write)(void *out, const unsigned char *buf, int n);
     int (*rewrite)(void *out, int n, unsigned dist);    /* return -1 if too far back, else bytes copied (expect n) */
 } ZIO;
 
-int puffs(ZIO *z, unsigned validate);
+int puffs(ZIO *z, int validate);

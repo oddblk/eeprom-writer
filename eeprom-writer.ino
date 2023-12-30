@@ -79,7 +79,8 @@ static const int addrPins[15] = {
     kPin_Addr8, kPin_Addr9, kPin_Addr10, kPin_Addr11, kPin_Addr12, kPin_Addr13, kPin_Addr14
 };
 
-byte command[80]; // strings received from the controller will go in here; note  drops chars after 64
+static const int kMaxCommandSize = 120;
+byte command[kMaxCommandSize]; // strings received from the controller will go in here; note  drops chars after 64
 
 static const int kMaxBufferSize = 64;
 byte buffer[kMaxBufferSize];
@@ -89,7 +90,7 @@ static const long int k_uTime_ReadPulse_uS = 1;
 // (to be honest, both of the above are about ten times too big - but the Arduino won't reliably
 // delay down at the nanosecond level, so this is the best we can do.)
 
-static const unsigned eeprom_size = 1 << 15;   // 32K
+static const unsigned long eeprom_size = 1 << 15;   // 32K
 
 // the setup function runs once when you press reset or power the board
 void setup()
@@ -239,26 +240,26 @@ void WriteEEPROM() // W<four byte hex address>:<data in hex, two characters per 
 
 struct SerialReader {
     unsigned char buf[kMaxBufferSize];
-    unsigned buflen;
-    unsigned bufidx;
+    int buflen;
+    int bufidx;
 };
 
 void sr_init(SerialReader *s);
-int sr_read(SerialReader *s, unsigned char *buf, unsigned n);
+int sr_read(SerialReader *s, unsigned char *buf, int n);
 
 void sr_init(SerialReader *s) {
     s->buflen = 0;
     s->bufidx = 0;
 }
 
-int sr_read(SerialReader *s, unsigned char *buf, unsigned n) {
-    unsigned req, actual, avail;
+int sr_read(SerialReader *s, unsigned char *buf, int n) {
+    int req, actual, avail;
 
     actual = 0;
     while (actual < n) {
         if (s->bufidx >= s->buflen) {
             ReadString();
-            unsigned len = strlen(command);
+            int len = strlen(command);
             Serial.println(len);        // ack the input line with number of chars
             if (len > kMaxBufferSize) return -1;     // overflow!
             s->bufidx = 0;
@@ -275,20 +276,20 @@ int sr_read(SerialReader *s, unsigned char *buf, unsigned n) {
     return actual;
 }
 
-const unsigned ew_bufsiz = 1 << 8;      // must be a power of 2 for rewrite implementation
+const int ew_bufsiz = 1 << 6;      // must be a power of 2 for rewrite implementation
 
 struct EepromWriter {
     unsigned long base_address;
 
     unsigned char buf[ew_bufsiz];
-    unsigned bufidx;
+    int bufidx;
 
     unsigned long outlen;
     unsigned long chksum;
 };
 
 void ew_init(EepromWriter *ew, unsigned long base_address);
-int ew_write(EepromWriter *ew, const unsigned char *buf, unsigned n);
+int ew_write(EepromWriter *ew, const unsigned char *buf, int n);
 int ew_rewrite(EepromWriter *ew, int n, unsigned dist);
 void ew_flush(EepromWriter *ew);
 
@@ -300,10 +301,10 @@ void ew_init(EepromWriter *ew, unsigned long base_address) {
     ew->chksum = 1;   // starting value for adler32
 }
 
-int ew_write(EepromWriter *ew, const unsigned char *buf, unsigned n) {
-    unsigned actual = 0, k;
+int ew_write(EepromWriter *ew, const unsigned char *buf, int n) {
+    int actual = 0, k;
 
-    if (ew->outlen + n > eeprom_size) n = eeprom_size - ew->outlen;
+    if (n + ew->outlen > eeprom_size) n = eeprom_size - ew->outlen;
 
     while (actual < n) {
         if (ew->bufidx & ew_bufsiz) ew_flush(ew);
@@ -326,7 +327,7 @@ int ew_rewrite(EepromWriter *ew, int n, unsigned dist) {
          * we can do a forward copy rolling from low to high index
          * so that, e.g. rewrite(..., 10, -1) makes 10 copies of the last byte
          */
-        unsigned from = (ew->bufidx - dist) & (ew_bufsiz - 1);
+        int from = (ew->bufidx - dist) & (ew_bufsiz - 1);
         for (int i=0; i<n; i++) {
             if (ew->bufidx & ew_bufsiz) ew_flush(ew);
             if (from & ew_bufsiz) from = 0;
@@ -369,24 +370,24 @@ void ChecksumEEPROM() {
         n = strtol(p, NULL, 16);
     if (n == 0 || addr + n > eeprom_size) n = eeprom_size - addr;
 
-    unsigned long a32chk = 1, xorchk = 0;
+    unsigned long a32chk = 1, xorchk = 0, todo = n;
 
-    Serial.println("Computing checksums");
-
-    while (n > 0) {
-        int i = n > kMaxBufferSize ? kMaxBufferSize : n;
+    while (todo > 0) {
+        int i = todo > kMaxBufferSize ? kMaxBufferSize : todo;
         ReadEEPROMIntoBuffer(buffer, addr, i);
         a32chk = adler32(a32chk, buffer, i);
         xorchk ^= CalcBufferChecksum(i);
         addr += i;
-        n -= i;
+        todo -= i;
     }
-    Serial.print("XOR ");
+    Serial.print("BYTES ");
+    Serial.print(n);
+    Serial.print(" XOR ");
     if (xorchk < 16) Serial.print("0");
     Serial.print(xorchk, HEX);
     Serial.print(" ADLER32 ");
     for (int i=3; i>=0; i--) {
-        unsigned b = (a32chk >> (i<<3)) & 0xff;
+        unsigned char b = (a32chk >> (i<<3)) & 0xff;
         if (b < 16) Serial.print("0");
         Serial.print(b, HEX);
     }
@@ -396,17 +397,7 @@ void ChecksumEEPROM() {
 
 void BulkWriteEEPROM() {
   // Z <four byte address>
-  // followed by base64 encoded deflate data (max 64 char per line) terminated by blank line
-  // Here's an example with header 78 9c and trailing checksum dd 08 8a fb (3708324603) which decodes to 388 bytes
-  /*
-Z 1234
-eJwtkEFyhTAMQ/ecQhfoP0a77BkMMeD5xmESU0pPX/HbXTKyNE96l4Z6JCyQ
-q+KIaZWWWjDK9DwltXXU+V+bpa9WQ0ZXQKOA0nBLOLXzNIC+WxMHpG23ipfz
-Q1y+L7hph6Bv4s60pou0omW41L2e6Ec8huGzjZYWC43G66ShWE+JSe+8Vo9l
-9QthoXm95VmBzdyJ9XpoH2iD8HckkXhq0W0Jm22SSEJkEn/0Q7E01cDuwiyc
-a+0K2fVtKNon1uMKbrNirm0jSlP0Ctnkh3jM3ZttRP1SopLzbnpxgCQNR7F4
-Enyx5BrccVr1L0Lo00w2UJqsqDx+Ad0Iivs=
-  */
+  // followed by lines of base64 encoded deflate data (max 64 char per line)
 
   if (command[1] == 0)
   {
@@ -578,7 +569,7 @@ void AwaitWriteComplete(byte b) {
 // ----------------------------------------------------------------------------------------
 
 // INPUT means we're reading from eeprom
-void SetDataDirection(unsigned direction)
+void SetDataDirection(int direction)
 {
   for (int i=0; i<8; i++) pinMode(dataPins[i], direction);
   // set eeprom to output when arduino wants to input, and vice versa
@@ -636,7 +627,7 @@ void ReadString()     // read input excluding whitespace until \n into null-term
       c = Serial.read();
       if (c > 31) command[i++] = c;
     }
-  } while (c != 10);
+  } while (c != 10 && i < kMaxCommandSize-1);
   command[i] = 0;
 }
 

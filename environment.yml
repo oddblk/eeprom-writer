@@ -1,0 +1,10 @@
+name: eeprom-writer
+dependencies:
+  - pip
+  - python=3
+  - pip:
+    - pyserial
+    - flake8
+    - flake8-black
+    - mypy
+

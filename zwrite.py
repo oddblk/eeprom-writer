@@ -12,6 +12,9 @@ from zlib import compress
 from base64 import b64encode
 
 
+eeprom_size = 1 << 15           # 32K eeprom
+
+
 def chunked(s: bytes, chunk_size: int = 60) -> list[bytes]:
     """Split a string (or bytes) into fixed size chunks"""
     return [
@@ -24,20 +27,41 @@ parser = argparse.ArgumentParser(
     description='Write binary rom images with eeprom-writer',
 )
 
-parser.add_argument('romfile',
+parser.add_argument('romfile', nargs='?',
     help="Binary ROM image to upload")
-parser.add_argument('-a', '--address',
-    default='0', help="hex start address for upload")
+parser.add_argument('-f', '--fill', nargs='+',
+    help="Fill with hex byte(s)")
+parser.add_argument('-a', '--address', default='0',
+    help="hex start address for upload (default 0)")
+parser.add_argument('-l', '--length',
+    help="truncate fill pattern (or rom) after hex length bytes")
 parser.add_argument('-p', '--port',
     help="Arduino USB port, like /dev/cu.usbmodem14101 (default autodetect)")
-parser.add_argument('-c', '--check',
-    action='store_true', help="Re-read to test checksum after writing")
+parser.add_argument('-c', '--check', action='store_true',
+    help="Re-read to test checksum after writing")
 
 args = parser.parse_args()
 
-print(f"(reading rom from {args.romfile})")
+if not args.romfile and not args.fill:
+    sys.stderr.write("error: specify either romfile or --fill option\n")
+    parser.print_help()
+    sys.exit(1)
 
-rom = open(args.romfile, 'rb').read()
+start = int(args.address, 16)
+length = int(args.length, 16) if args.length else None
+
+if args.romfile:
+    print(f"(reading rom from {args.romfile})")
+    rom = open(args.romfile, 'rb').read()
+    if length:
+        rom = rom[:length]
+else:
+    pattern = bytes([int(v, 16) for v in args.fill])
+    s = ''.join(' {:02x}'.format(b).upper() for b in pattern)
+    print(f"(filling {length} bytes with{s})")
+    if not length:
+        length = eeprom_size - start
+    rom = (pattern * (length//len(pattern) + 1))[:length]
 
 zipped = compress(rom)
 payload = b64encode(zipped)

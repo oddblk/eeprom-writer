@@ -10,6 +10,7 @@
 //                - properly looked at timings on the Atmel datasheet, and worked out that my delays
 //                  during reads and writes were about 10,000 times too big!
 //                  Reading and writing is now orders-of-magnitude quicker.
+//  30th Dec 2023 - Fixed paged write bug; added zlib support; more flexible input handling (Patrick Surry)
 //
 // Distributed under an acknowledgement licence, because I'm a shallow, attention-seeking tart. :)
 //
@@ -165,7 +166,8 @@ void ReadEEPROM()
   ReadEEPROMIntoBuffer(buffer, addr, n);
 
   // now print the results, starting with the address as hex ...
-  Serial.print(addr, HEX);
+  PrintByte((addr >> 8) & 0xff);
+  PrintByte(addr & 0xff);
   Serial.print(":");
   PrintBuffer(n);
 
@@ -192,19 +194,32 @@ void WriteEEPROM() // W<four byte hex address>:<data in hex, two characters per 
 
   uint8_t iBufferUsed = 0;
   byte tmp;
+  char *q;
   while (1) {
+    // handle "ABCDEF" (3 hex digit pairs); "AB CD EF"; and "E  F 10 11" (single digits and extra spacing)
+    // edge case is string ending with a single digit
     while (*p == ' ') p++;
-    if (*p == 0 || *(p+1) == 0 || *p == ',' || iBufferUsed == kMaxBufferSize) break;
+    if (*p == 0 || *p == ',' || iBufferUsed == kMaxBufferSize) break;
 
-    tmp = *(p+2);
-    *(p+2) = 0;
-    buffer[iBufferUsed++] = strtol(p, NULL, 16);
-    p += 2;
-    *p = tmp;
+    // if not past end of string, temporarily terminate so we parse at most two chars
+    if (*(p+1)) {
+        tmp = *(p+2);
+        *(p+2) = 0;
+    }
+    buffer[iBufferUsed++] = strtol(p, &q, 16);
+    if (q == p) {
+        // stop at bad input
+        Serial.print("WARN invalid input at index ");
+        Serial.println(p - (char*)command);
+        iBufferUsed--;
+        break;
+    }
+    if (*(p+1)) *(p+2) = tmp;   // remove temporary terminator
+    p = q;          // advance past parsed data, which might be a single char
   }
 
   // if we're pointing to a comma, then the optional checksum has been provided!
-  if (*p == ',' && *(p+1) && *(p+2))
+  if (*p == ',' && *(p+1))
   {
     byte checksum = strtol(p+1, NULL, 16);
 
@@ -214,11 +229,10 @@ void WriteEEPROM() // W<four byte hex address>:<data in hex, two characters per 
     {
       // checksum fail!
       iBufferUsed = -1;
-      Serial.print("ERR ");
-      Serial.print(checksum, HEX);
-      Serial.print(" ");
-      Serial.print(our_checksum, HEX);
-      Serial.println("");
+      Serial.print("ERR expected ");
+      PrintByte(checksum);
+      Serial.print(" got ");
+      PrintByte(our_checksum);
       return;
     }
   }
@@ -229,10 +243,7 @@ void WriteEEPROM() // W<four byte hex address>:<data in hex, two characters per 
     WriteBufferToEEPROM(buffer, addr, iBufferUsed);
   }
 
-  if (iBufferUsed > -1)
-  {
-    Serial.println("OK");
-  }
+  Serial.println("OK");
 }
 
 
@@ -383,13 +394,11 @@ void ChecksumEEPROM() {
     Serial.print("BYTES ");
     Serial.print(n);
     Serial.print(" XOR ");
-    if (xorchk < 16) Serial.print("0");
-    Serial.print(xorchk, HEX);
+    PrintByte(xorchk);
     Serial.print(" ADLER32 ");
     for (int i=3; i>=0; i--) {
         unsigned char b = (a32chk >> (i<<3)) & 0xff;
-        if (b < 16) Serial.print("0");
-        Serial.print(b, HEX);
+        PrintByte(b);
     }
     Serial.println();
 }
@@ -561,9 +570,11 @@ void AwaitWriteComplete(byte b) {
      * Reading the last byte written shows bit 7 complemented and bit 6 toggling until
      * the write cycle is done, so we can just wait for the full byte to match what we wrote
      */
+    digitalWrite(kPin_LED_Grn, HIGH);
     SetDataDirection(INPUT);
     while (ReadData() != b) delayMicroseconds(100);
     SetDataDirection(OUTPUT);
+    digitalWrite(kPin_LED_Grn, LOW);
 }
 
 // ----------------------------------------------------------------------------------------
@@ -598,6 +609,12 @@ byte ReadData()
 
 // ----------------------------------------------------------------------------------------
 
+void PrintByte(byte b) 
+{
+    if (b < 16) Serial.print("0"); // force leading 0
+    Serial.print(b, HEX);
+}
+
 void PrintBuffer(int size)
 {
   uint8_t chk = 0, v;
@@ -605,14 +622,12 @@ void PrintBuffer(int size)
   for (uint8_t i = 0; i < size; i++)
   {
     v = buffer[i];
-    if (v<16) Serial.print("0");  // force leading 0
-    Serial.print(v, HEX);
-
+    PrintByte(v);
     chk ^= v;
   }
 
   Serial.print(",");
-  Serial.print(chk, HEX);
+  PrintByte(chk);
   Serial.println("");
 }
 

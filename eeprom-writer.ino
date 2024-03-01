@@ -256,18 +256,18 @@ void SetSDPState(bool bWriteProtect)
 
   if (bWriteProtect)
   {
-    WriteByteTo(0x1555, 0xAA);
-    WriteByteTo(0x0AAA, 0x55);
-    WriteByteTo(0x1555, 0xA0);
+    WriteByteTo(0x5555, 0xAA);
+    WriteByteTo(0x2AAA, 0x55);
+    WriteByteTo(0x5555, 0xA0);
   }
   else
   {
-    WriteByteTo(0x1555, 0xAA);
-    WriteByteTo(0x0AAA, 0x55);
-    WriteByteTo(0x1555, 0x80);
-    WriteByteTo(0x1555, 0xAA);
-    WriteByteTo(0x0AAA, 0x55);
-    WriteByteTo(0x1555, 0x20);
+    WriteByteTo(0x5555, 0xAA);
+    WriteByteTo(0x2AAA, 0x55);
+    WriteByteTo(0x5555, 0x80);
+    WriteByteTo(0x5555, 0xAA);
+    WriteByteTo(0x2AAA, 0x55);
+    WriteByteTo(0x5555, 0x20);
   }
   
   WriteByteTo(0x0000, bytezero); // this "dummy" write is required so that the EEPROM will flush its buffer of commands.
